@@ -7,7 +7,6 @@ import Image from "next/image";
 import Link from "next/link";
 import { X, ZoomIn, ArrowLeft, MessageCircle } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { db } from "@/lib/db";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -210,10 +209,16 @@ export default function GalleryPage() {
   const [selected, setSelected] = useState<GalleryItem | null>(null);
 
   useEffect(() => {
-    db.gallery.findMany().then((data) => {
-      setItems(data as GalleryItem[]);
-      setLoading(false);
-    });
+    fetch('/api/gallery')
+      .then((r) => r.json())
+      .then((json) => {
+        setItems((json.items ?? []) as GalleryItem[]);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error('[GalleryPage] fetch failed:', err);
+        setLoading(false);
+      });
   }, []);
 
   const closeModal = useCallback(() => setSelected(null), []);

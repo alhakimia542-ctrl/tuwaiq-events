@@ -5,7 +5,6 @@ export const dynamic = "force-dynamic";
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import { storage } from "@/lib/firebase";
-import { db } from "@/lib/db";
 import { ref, uploadBytesResumable, getDownloadURL, deleteObject } from "firebase/storage";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -51,6 +50,7 @@ export default function AdminGalleryPage() {
   const [uploadingIndex, setUploadingIndex] = useState<number | null>(null); // which file is currently uploading
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -59,8 +59,12 @@ export default function AdminGalleryPage() {
   const fetchItems = async () => {
     setLoading(true);
     try {
-      const data = await db.gallery.findMany();
-      setItems(data as GalleryItem[]);
+      const res = await fetch('/api/gallery');
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.message ?? 'Failed to load gallery.');
+      setItems((json.items ?? []) as GalleryItem[]);
+    } catch (err: any) {
+      console.error('[fetchItems]', err);
     } finally {
       setLoading(false);
     }
@@ -115,28 +119,58 @@ export default function AdminGalleryPage() {
     if (!files.length || !caption.trim()) return;
 
     setIsUploading(true);
+    setUploadError(null);
+
+    let anyFailed = false;
 
     try {
       for (let i = 0; i < files.length; i++) {
         setUploadingIndex(i);
         setUploadProgress(0);
-        const imageURL = await uploadSingleFile(files[i]);
-        await db.gallery.create({ data: { imageURL, caption, category } });
+
+        // 1️⃣  Upload file to Firebase Storage
+        let imageURL: string;
+        try {
+          imageURL = await uploadSingleFile(files[i]);
+        } catch (storageErr: any) {
+          console.error(`[Storage upload failed] file ${i}:`, storageErr);
+          setUploadError(`Storage upload failed: ${storageErr?.message ?? 'Unknown error'}`);
+          anyFailed = true;
+          continue;
+        }
+
+        // 2️⃣  Save metadata to Firestore via the server-side API route
+        try {
+          const res = await fetch('/api/gallery', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageURL, caption, category }),
+          });
+          const json = await res.json();
+          if (!res.ok) {
+            throw new Error(json.message ?? `Server responded with ${res.status}`);
+          }
+        } catch (firestoreErr: any) {
+          console.error(`[Firestore write failed] file ${i}:`, firestoreErr);
+          setUploadError(`Saved to Storage but Firestore write failed: ${firestoreErr?.message ?? 'Unknown error'}`);
+          anyFailed = true;
+          // Do NOT continue — still try remaining files
+        }
       }
-    } catch (err) {
-      console.error("Upload error", err);
     } finally {
-      // Reset form
-      previewURLs.forEach((u) => URL.revokeObjectURL(u));
-      setFiles([]);
-      setPreviewURLs([]);
-      setCaption("");
-      setCategory(CATEGORIES[0]);
+      // Reset form only on full success
+      if (!anyFailed) {
+        previewURLs.forEach((u) => URL.revokeObjectURL(u));
+        setFiles([]);
+        setPreviewURLs([]);
+        setCaption("");
+        setCategory(CATEGORIES[0]);
+        setShowForm(false);
+      }
       setUploadProgress(0);
       setUploadingIndex(null);
       setIsUploading(false);
-      setShowForm(false);
-      await fetchItems();
+      await fetchItems(); // always refresh the grid
     }
   };
 
@@ -145,13 +179,32 @@ export default function AdminGalleryPage() {
     if (!confirm(`Delete "${item.caption}"?`)) return;
     setDeletingId(item.id);
     try {
+      // 1️⃣  Delete from Firebase Storage (best-effort)
       if (item.imageURL) {
         try {
-          await deleteObject(ref(storage, item.imageURL));
-        } catch (_) { /* ignore if already deleted or external */ }
+          // getDownloadURL returns a URL with a token; we need the storage path.
+          // Try to derive the path from the URL, fall back to treating imageURL as a path.
+          const storageRef = item.imageURL.startsWith('https://')
+            ? ref(storage, decodeURIComponent(item.imageURL.split('/o/')[1]?.split('?')[0] ?? ''))
+            : ref(storage, item.imageURL);
+          await deleteObject(storageRef);
+        } catch (_) { /* ignore — file may already be gone or URL is external */ }
       }
-      await db.gallery.delete({ where: { id: item.id } });
+
+      // 2️⃣  Delete Firestore record via server-side API route
+      const res = await fetch('/api/gallery', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: item.id }),
+      });
+      if (!res.ok) {
+        const json = await res.json();
+        throw new Error(json.message ?? `Server responded with ${res.status}`);
+      }
       setItems((prev) => prev.filter((i) => i.id !== item.id));
+    } catch (err: any) {
+      console.error('[handleDelete]', err);
+      alert(`Failed to delete: ${err?.message ?? 'Unknown error'}`);
     } finally {
       setDeletingId(null);
     }
@@ -309,6 +362,18 @@ export default function AdminGalleryPage() {
                   style={{ width: `${uploadProgress}%` }}
                 />
               </div>
+            </div>
+          )}
+
+          {/* Error banner */}
+          {uploadError && (
+            <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3">
+              <span className="text-red-400 text-sm leading-snug">⚠ {uploadError}</span>
+              <button
+                type="button"
+                onClick={() => setUploadError(null)}
+                className="ml-auto text-red-400/60 hover:text-red-400 text-sm shrink-0"
+              >✕</button>
             </div>
           )}
 
