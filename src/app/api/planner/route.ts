@@ -5,11 +5,24 @@ export async function POST(req: NextRequest) {
   try {
     const { eventType, city, guests, budget, theme } = await req.json();
 
-    if (!process.env.GEMINI_API_KEY) {
-      throw new Error("GEMINI_API_KEY is missing in environment variables.");
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === 'your_gemini_api_key_here') {
+      // Gemini key not configured — return a safe fallback instead of throwing
+      return NextResponse.json({
+        suggestedTheme: 'ملكي فاخر',
+        colors: ['#D4AF37', '#002B5B', '#FDFBF7'],
+        estimatedCost: 'تواصل معنا للحصول على عرض سعر',
+        equipment: [
+          'كوشة ورود طبيعية فاخرة',
+          'طاولات VIP مع إضاءة',
+          'نظام صوت وإضاءة متكامل',
+          'ضيافة فندقية 5 نجوم',
+          'تنسيق مكان شامل',
+        ],
+      });
     }
 
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const genAI = new GoogleGenerativeAI(apiKey);
     // Use gemini-2.5-flash for fast text and JSON generation
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 

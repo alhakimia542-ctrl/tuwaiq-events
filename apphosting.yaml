@@ -8,7 +8,6 @@
 #   npx firebase-tools apphosting:secrets:set ADMIN_EMAIL
 #   npx firebase-tools apphosting:secrets:set ADMIN_PASSWORD
 #   npx firebase-tools apphosting:secrets:set ADMIN_SESSION_SECRET
-#   npx firebase-tools apphosting:secrets:set GEMINI_API_KEY
 
 runConfig:
   minInstances: 0
@@ -31,6 +30,3 @@ env:
   - variable: ADMIN_SESSION_SECRET
     secret: ADMIN_SESSION_SECRET
 
-  # ── AI / Gemini ──────────────────────────────────────────────────────────
-  - variable: GEMINI_API_KEY
-    secret: GEMINI_API_KEY
