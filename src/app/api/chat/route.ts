@@ -19,18 +19,16 @@ const SYSTEM_PROMPT = `أنت ممثل خدمة العملاء الذكي وال
 3. إذا سألك عن السوشيال ميديا، أعطه روابط الانستغرام أو التيك توك المذكورة أعلاه.
 4. كن ودوداً، مرحباً، وإذا طلب العميل حجزاً أو تفاصيل إضافية، اطلب منه التواصل مباشرة عبر رقم الواتساب الرسمي.`;
 
-// ─── HuggingFace OpenAI-compatible router endpoint ──────────────────────────
-// The legacy /models/<id> inference URL does not support chat-completion
-// routing. The /v1/chat/completions router is the modern, stable alternative.
-const HF_API_URL = "https://router.huggingface.co/v1/chat/completions";
-const HF_MODEL   = "Qwen/Qwen2.5-7B-Instruct";
+// ─── Native HuggingFace Inference API endpoint ──────────────────────────────
+const HF_API_URL =
+  "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct";
 
 export async function POST(request: NextRequest) {
   // 1. Parse request body
-  let message: string | undefined;
+  let userMessage: string | undefined;
   try {
     const body = await request.json();
-    message = body.message;
+    userMessage = body.message;
   } catch {
     return NextResponse.json(
       { response: "طلب غير صالح. يرجى إعادة المحاولة." },
@@ -38,7 +36,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  if (!message?.trim()) {
+  if (!userMessage?.trim()) {
     return NextResponse.json({
       response: "يسعدني مساعدتك! ما الذي تودّ الاستفسار عنه؟",
     });
@@ -46,15 +44,25 @@ export async function POST(request: NextRequest) {
 
   // 2. Validate API key
   const apiKey = process.env.HUGGINGFACE_API_KEY;
-  if (!apiKey || apiKey.trim() === "") {
-    console.error("[Chat] HUGGINGFACE_API_KEY is not set.");
+  if (!apiKey || apiKey.trim() === "" || apiKey === "your_huggingface_api_key_here") {
+    console.error("[Chat] HUGGINGFACE_API_KEY is missing or still a placeholder.");
     return NextResponse.json({
       response:
         "المساعد الذكي غير متاح مؤقتاً. يسعدنا خدمتك مباشرةً عبر الواتساب على الرقم 0547498239 📲",
     });
   }
 
-  // 3. Call HuggingFace via the OpenAI-compatible chat-completions router
+  // 3. Build ChatML prompt — the native format Qwen2.5 expects
+  const chatMLPrompt =
+    "<|im_start|>system\n" +
+    SYSTEM_PROMPT +
+    "<|im_end|>\n" +
+    "<|im_start|>user\n" +
+    userMessage +
+    "<|im_end|>\n" +
+    "<|im_start|>assistant\n";
+
+  // 4. Call the native HuggingFace Inference API
   try {
     const hfResponse = await fetch(HF_API_URL, {
       method: "POST",
@@ -63,57 +71,71 @@ export async function POST(request: NextRequest) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: HF_MODEL,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user",   content: message },
-        ],
-        max_tokens: 250,
-        temperature: 0.7,
+        inputs: chatMLPrompt,
+        parameters: {
+          max_new_tokens: 250,
+          temperature: 0.7,
+          repetition_penalty: 1.1,
+          return_full_text: false,
+        },
       }),
     });
 
-    // ── Explicit HTTP error guard ────────────────────────────────────────────
-    // Read the raw body first so we can log the exact reason (401, 503, etc.)
-    // before deciding what to show the user.
+    // ── HTTP error guard ─────────────────────────────────────────────────
     if (!hfResponse.ok) {
-      let errorDescription = `HTTP ${hfResponse.status}`;
+      let errorDetail = "";
       try {
-        const errData = await hfResponse.json() as Record<string, unknown>;
-        const detail =
-          (errData?.error as string) ||
-          (errData?.message as string) ||
-          JSON.stringify(errData);
-        errorDescription += ` — ${detail}`;
+        const errBody = await hfResponse.json();
+        errorDetail =
+          (typeof errBody?.error === "string" && errBody.error) ||
+          (typeof errBody?.message === "string" && errBody.message) ||
+          JSON.stringify(errBody);
       } catch {
-        // Body was not JSON; read as plain text instead
-        const errText = await hfResponse.text().catch(() => "(unreadable body)");
-        errorDescription += ` — ${errText}`;
+        errorDetail = await hfResponse.text().catch(() => "(unreadable body)");
       }
 
-      console.error("[Chat] HuggingFace router error:", errorDescription);
+      console.error(
+        `[Chat] HuggingFace error ${hfResponse.status}:`,
+        errorDetail
+      );
 
       return NextResponse.json(
         {
-          response: `عذراً، تعذّر الاتصال بالنموذج (${errorDescription}). يرجى التواصل معنا عبر الواتساب على الرقم 0547498239 📲`,
+          response: `عذراً، تعذّر الاتصال بالنموذج (HTTP ${hfResponse.status} — ${errorDetail}). يرجى التواصل معنا عبر الواتساب على الرقم 0547498239 📲`,
         },
         { status: hfResponse.status }
       );
     }
 
-    // ── Parse successful response ─────────────────────────────────────────────
-    const data = await hfResponse.json() as Record<string, unknown>;
+    // ── Parse successful response ────────────────────────────────────────
+    // The native HF text-generation endpoint returns either:
+    //   [{ "generated_text": "..." }]   (array format — most common)
+    //   { "generated_text": "..." }     (object format — some model configs)
+    const data: unknown = await hfResponse.json();
 
-    // OpenAI-compatible shape: choices[0].message.content
-    type Choice = { message?: { content?: unknown } };
-    const choices = data?.choices;
-    const firstChoice = Array.isArray(choices) ? (choices[0] as Choice) : undefined;
-    const raw = firstChoice?.message?.content;
+    let rawText = "";
+    if (Array.isArray(data) && data.length > 0 && typeof data[0]?.generated_text === "string") {
+      rawText = data[0].generated_text;
+    } else if (
+      data !== null &&
+      typeof data === "object" &&
+      "generated_text" in data &&
+      typeof (data as Record<string, unknown>).generated_text === "string"
+    ) {
+      rawText = (data as Record<string, unknown>).generated_text as string;
+    }
 
-    let responseText = typeof raw === "string" ? raw.trim() : "";
+    // ── Strip stop tokens safely with indexOf / slice ────────────────────
+    const imEndPos = rawText.indexOf("<|im_end|>");
+    if (imEndPos !== -1) rawText = rawText.slice(0, imEndPos);
+
+    const imStartPos = rawText.indexOf("<|im_start|>");
+    if (imStartPos !== -1) rawText = rawText.slice(0, imStartPos);
+
+    let responseText = rawText.trim();
 
     if (!responseText) {
-      console.warn("[Chat] Empty content in HuggingFace response:", JSON.stringify(data));
+      console.warn("[Chat] Empty generated_text from HuggingFace:", JSON.stringify(data));
       responseText =
         "عذراً، لم أتمكن من صياغة الرد. يسعدنا خدمتك عبر الواتساب على الرقم 0547498239.";
     }
@@ -121,7 +143,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ response: responseText });
   } catch (error: unknown) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    console.error("[Chat] Unexpected error calling HuggingFace:", errMsg);
+    console.error("[Chat] Unexpected error:", errMsg);
     return NextResponse.json(
       {
         response:
