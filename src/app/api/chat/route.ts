@@ -20,8 +20,11 @@ const SYSTEM_PROMPT = `أنت ممثل خدمة العملاء الذكي وال
 4. كن ودوداً، مرحباً، وإذا طلب العميل حجزاً أو تفاصيل إضافية، اطلب منه التواصل مباشرة عبر رقم الواتساب الرسمي.`;
 
 // ─── HuggingFace model endpoint ────────────────────────────────────────────
+// Using the official base model which is fully supported by the serverless
+// inference API. LoRA adapters (custom fine-tunes) are not directly callable
+// via this endpoint, so we use Qwen/Qwen2.5-7B-Instruct instead.
 const HF_API_URL =
-  "https://api-inference.huggingface.co/models/alhakimia54/my-qwen2.5-custom-model";
+  "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct";
 
 export async function POST(request: NextRequest) {
   // 1. Parse request body
@@ -66,9 +69,9 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         inputs: fullPrompt,
         parameters: {
-          max_new_tokens: 200,
+          max_new_tokens: 250,
           temperature: 0.7,
-          repetition_penalty: 1.2,
+          repetition_penalty: 1.1,
           return_full_text: false,
         },
       }),
