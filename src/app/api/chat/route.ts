@@ -73,33 +73,59 @@ export async function POST(request: NextRequest) {
       }),
     });
 
+    // ── Explicit HTTP error guard ────────────────────────────────────────────
+    // Read the raw body first so we can log the exact reason (401, 503, etc.)
+    // before deciding what to show the user.
     if (!hfResponse.ok) {
-      const errorBody = await hfResponse.text();
-      console.error("[Chat] HuggingFace API error:", hfResponse.status, errorBody);
-      throw new Error(`HF router responded with status ${hfResponse.status}`);
+      let errorDescription = `HTTP ${hfResponse.status}`;
+      try {
+        const errData = await hfResponse.json() as Record<string, unknown>;
+        const detail =
+          (errData?.error as string) ||
+          (errData?.message as string) ||
+          JSON.stringify(errData);
+        errorDescription += ` — ${detail}`;
+      } catch {
+        // Body was not JSON; read as plain text instead
+        const errText = await hfResponse.text().catch(() => "(unreadable body)");
+        errorDescription += ` — ${errText}`;
+      }
+
+      console.error("[Chat] HuggingFace router error:", errorDescription);
+
+      return NextResponse.json(
+        {
+          response: `عذراً، تعذّر الاتصال بالنموذج (${errorDescription}). يرجى التواصل معنا عبر الواتساب على الرقم 0547498239 📲`,
+        },
+        { status: hfResponse.status }
+      );
     }
 
-    const data = await hfResponse.json();
+    // ── Parse successful response ─────────────────────────────────────────────
+    const data = await hfResponse.json() as Record<string, unknown>;
 
-    // OpenAI-compatible response shape: choices[0].message.content
-    let responseText: string =
-      data?.choices?.[0]?.message?.content ?? "";
-    responseText = responseText.trim();
+    // OpenAI-compatible shape: choices[0].message.content
+    type Choice = { message?: { content?: unknown } };
+    const choices = data?.choices;
+    const firstChoice = Array.isArray(choices) ? (choices[0] as Choice) : undefined;
+    const raw = firstChoice?.message?.content;
+
+    let responseText = typeof raw === "string" ? raw.trim() : "";
 
     if (!responseText) {
+      console.warn("[Chat] Empty content in HuggingFace response:", JSON.stringify(data));
       responseText =
         "عذراً، لم أتمكن من صياغة الرد. يسعدنا خدمتك عبر الواتساب على الرقم 0547498239.";
     }
 
     return NextResponse.json({ response: responseText });
   } catch (error: unknown) {
-    const message =
-      error instanceof Error ? error.message : "Unknown error";
-    console.error("[Chat] Error calling HuggingFace:", message);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    console.error("[Chat] Unexpected error calling HuggingFace:", errMsg);
     return NextResponse.json(
       {
         response:
-          "عذراً، أواجه صعوبة في الاتصال حالياً. يمكنك التواصل معنا مباشرة عبر الواتساب على الرقم 0547498239 لخدمتك فوراً 📲",
+          "عذراً، حدث خطأ غير متوقع. يمكنك التواصل معنا مباشرةً عبر الواتساب على الرقم 0547498239 لخدمتك فوراً 📲",
       },
       { status: 500 }
     );
