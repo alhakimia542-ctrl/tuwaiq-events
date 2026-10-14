@@ -88,11 +88,12 @@ export async function POST(request: NextRequest) {
       data?.generated_text ||
       "";
 
-    // Strip any trailing stop tokens the model might emit
-    responseText = responseText
-      .replace(/<\|im_end\|>.*/s, "")
-      .replace(/<\|im_start\|>.*/s, "")
-      .trim();
+    // Strip any trailing stop tokens the model might emit (no regex flags needed)
+    const endIdx = responseText.indexOf("<|im_end|>");
+    if (endIdx !== -1) responseText = responseText.slice(0, endIdx);
+    const startIdx = responseText.indexOf("<|im_start|>");
+    if (startIdx !== -1) responseText = responseText.slice(0, startIdx);
+    responseText = responseText.trim();
 
     if (!responseText) {
       responseText =
