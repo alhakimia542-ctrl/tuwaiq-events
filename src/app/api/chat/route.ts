@@ -19,12 +19,11 @@ const SYSTEM_PROMPT = `أنت ممثل خدمة العملاء الذكي وال
 3. إذا سألك عن السوشيال ميديا، أعطه روابط الانستغرام أو التيك توك المذكورة أعلاه.
 4. كن ودوداً، مرحباً، وإذا طلب العميل حجزاً أو تفاصيل إضافية، اطلب منه التواصل مباشرة عبر رقم الواتساب الرسمي.`;
 
-// ─── HuggingFace model endpoint ────────────────────────────────────────────
-// Using the official base model which is fully supported by the serverless
-// inference API. LoRA adapters (custom fine-tunes) are not directly callable
-// via this endpoint, so we use Qwen/Qwen2.5-7B-Instruct instead.
-const HF_API_URL =
-  "https://api-inference.huggingface.co/models/Qwen/Qwen2.5-7B-Instruct";
+// ─── HuggingFace OpenAI-compatible router endpoint ──────────────────────────
+// The legacy /models/<id> inference URL does not support chat-completion
+// routing. The /v1/chat/completions router is the modern, stable alternative.
+const HF_API_URL = "https://router.huggingface.co/v1/chat/completions";
+const HF_MODEL   = "Qwen/Qwen2.5-7B-Instruct";
 
 export async function POST(request: NextRequest) {
   // 1. Parse request body
@@ -55,10 +54,7 @@ export async function POST(request: NextRequest) {
     });
   }
 
-  // 3. Build the prompt in the chat-ml format that Qwen2.5 expects
-  const fullPrompt = `<|im_start|>system\n${SYSTEM_PROMPT}<|im_end|>\n<|im_start|>user\n${message}<|im_end|>\n<|im_start|>assistant\n`;
-
-  // 4. Call Hugging Face Serverless Inference API
+  // 3. Call HuggingFace via the OpenAI-compatible chat-completions router
   try {
     const hfResponse = await fetch(HF_API_URL, {
       method: "POST",
@@ -67,35 +63,27 @@ export async function POST(request: NextRequest) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        inputs: fullPrompt,
-        parameters: {
-          max_new_tokens: 250,
-          temperature: 0.7,
-          repetition_penalty: 1.1,
-          return_full_text: false,
-        },
+        model: HF_MODEL,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user",   content: message },
+        ],
+        max_tokens: 250,
+        temperature: 0.7,
       }),
     });
 
     if (!hfResponse.ok) {
       const errorBody = await hfResponse.text();
       console.error("[Chat] HuggingFace API error:", hfResponse.status, errorBody);
-      throw new Error(`HF API responded with status ${hfResponse.status}`);
+      throw new Error(`HF router responded with status ${hfResponse.status}`);
     }
 
     const data = await hfResponse.json();
 
-    // HF text-generation returns an array: [{ generated_text: "..." }]
+    // OpenAI-compatible response shape: choices[0].message.content
     let responseText: string =
-      (Array.isArray(data) && data[0]?.generated_text) ||
-      data?.generated_text ||
-      "";
-
-    // Strip any trailing stop tokens the model might emit (no regex flags needed)
-    const endIdx = responseText.indexOf("<|im_end|>");
-    if (endIdx !== -1) responseText = responseText.slice(0, endIdx);
-    const startIdx = responseText.indexOf("<|im_start|>");
-    if (startIdx !== -1) responseText = responseText.slice(0, startIdx);
+      data?.choices?.[0]?.message?.content ?? "";
     responseText = responseText.trim();
 
     if (!responseText) {
