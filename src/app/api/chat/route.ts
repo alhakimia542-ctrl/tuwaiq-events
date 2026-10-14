@@ -63,6 +63,11 @@ export async function POST(request: NextRequest) {
     "<|im_start|>assistant\n";
 
   // 4. Call the native HuggingFace Inference API
+  //    Use AbortController to enforce a 25-second timeout so the request
+  //    never hangs indefinitely on cold-start or network issues.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 25_000);
+
   try {
     const hfResponse = await fetch(HF_API_URL, {
       method: "POST",
@@ -79,9 +84,28 @@ export async function POST(request: NextRequest) {
           return_full_text: false,
         },
       }),
+      signal: controller.signal,
     });
 
-    // ── HTTP error guard ─────────────────────────────────────────────────
+    // ── 503: Model is loading (cold start) ──────────────────────────────
+    if (hfResponse.status === 503) {
+      let estimatedTime = "";
+      try {
+        const loadingBody = await hfResponse.json();
+        if (typeof loadingBody?.estimated_time === "number") {
+          estimatedTime = ` (الوقت المقدّر: ${Math.ceil(loadingBody.estimated_time)} ثانية)`;
+        }
+        console.warn("[Chat] Model is loading (503):", JSON.stringify(loadingBody));
+      } catch {
+        console.warn("[Chat] Model is loading (503) — no JSON body.");
+      }
+
+      return NextResponse.json({
+        response: `النموذج قيد التشغيل والتحميل الآن${estimatedTime}، يرجى المحاولة بعد ثوانٍ معدودة. 🔄`,
+      });
+    }
+
+    // ── Other HTTP errors (401, 400, 500, etc.) ─────────────────────────
     if (!hfResponse.ok) {
       let errorDetail = "";
       try {
@@ -95,22 +119,19 @@ export async function POST(request: NextRequest) {
       }
 
       console.error(
-        `[Chat] HuggingFace error ${hfResponse.status}:`,
+        `[Chat] HuggingFace HTTP ${hfResponse.status}:`,
         errorDetail
       );
 
-      return NextResponse.json(
-        {
-          response: `عذراً، تعذّر الاتصال بالنموذج (HTTP ${hfResponse.status} — ${errorDetail}). يرجى التواصل معنا عبر الواتساب على الرقم 0547498239 📲`,
-        },
-        { status: hfResponse.status }
-      );
+      return NextResponse.json({
+        response: `عذراً، تعذّر الاتصال بالنموذج (HTTP ${hfResponse.status} — ${errorDetail}). يرجى التواصل معنا عبر الواتساب على الرقم 0547498239 📲`,
+      });
     }
 
     // ── Parse successful response ────────────────────────────────────────
     // The native HF text-generation endpoint returns either:
-    //   [{ "generated_text": "..." }]   (array format — most common)
-    //   { "generated_text": "..." }     (object format — some model configs)
+    //   [{ "generated_text": "..." }]   (array — most common)
+    //   { "generated_text": "..." }     (object — some model configs)
     const data: unknown = await hfResponse.json();
 
     let rawText = "";
@@ -142,14 +163,26 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({ response: responseText });
   } catch (error: unknown) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    console.error("[Chat] Unexpected error:", errMsg);
-    return NextResponse.json(
-      {
+    // ── Timeout (AbortController fired) ─────────────────────────────────
+    if (error instanceof DOMException && error.name === "AbortError") {
+      console.error("[Chat] Fetch timed out after 25 seconds.");
+      return NextResponse.json({
         response:
-          "عذراً، حدث خطأ غير متوقع. يمكنك التواصل معنا مباشرةً عبر الواتساب على الرقم 0547498239 لخدمتك فوراً 📲",
-      },
-      { status: 500 }
-    );
+          "عذراً، استغرق النموذج وقتاً أطول من المتوقع للردّ. يرجى المحاولة مرة أخرى بعد لحظات. ⏳",
+      });
+    }
+
+    // ── Network / DNS / TLS / other fetch-level failure ──────────────────
+    const errName = error instanceof Error ? error.name : "UnknownError";
+    const errMsg = error instanceof Error ? error.message : String(error);
+    const errCause = error instanceof Error && error.cause ? String(error.cause) : "";
+    console.error(`[Chat] Fetch failed [${errName}]: ${errMsg}`, errCause ? `| cause: ${errCause}` : "");
+
+    return NextResponse.json({
+      response:
+        "عذراً، تعذّر الاتصال بالخادم. يمكنك التواصل معنا مباشرةً عبر الواتساب على الرقم 0547498239 لخدمتك فوراً 📲",
+    });
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
